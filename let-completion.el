@@ -72,7 +72,7 @@ Also see `let-completion-mode'."
 
 (defvar let-completion--doc-buffer nil
   "Reusable buffer for pretty-printed binding values.
-Created on first use by `let-completion--doc-buffer'.
+Created on first use by the function `let-completion--doc-buffer'.
 Consumed by corfu-popupinfo via `:company-doc-buffer'.")
 
 (defun let-completion--doc-buffer ()

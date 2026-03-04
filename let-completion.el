@@ -103,6 +103,8 @@ Recognize `let', `let*', `when-let', `when-let*', `if-let',
 nil when point is in the else branch, where bindings are not in
 scope.
 
+Skip the binding whose source span contains point.
+
 Called by `let-completion--binding-values'."
   (save-excursion
     (let ((completion-pos (point)))
@@ -110,30 +112,51 @@ Called by `let-completion--binding-values'."
       (when (looking-at
              "\\_<\\(?:and-let\\*\\|\\(if-let\\*?\\)\\|let\\*?\\|when-let\\*?\\)\\_>")
         (let ((is-if-let (match-beginning 1)))
-          (let ((end (save-excursion
-                       (forward-sexp 1)
-                       (forward-sexp 1)
-                       (point))))
-            (forward-sexp 1)
+          (forward-sexp 1)
+          (let ((bindings-end (save-excursion
+                                (ignore-errors (forward-sexp 1))
+                                (point))))
+            ;; For `if-let'/`if-let*', suppress bindings in else branch.
             (when (and is-if-let
                        (ignore-errors
                          (save-excursion
-                           (goto-char end)
+                           (goto-char bindings-end)
                            (forward-sexp 1)
                            (< (point) completion-pos))))
-              (setq end nil))
-            (when end
-              (ignore-errors
+              (setq bindings-end nil))
+            (when bindings-end
+              ;; Move inside the binding list paren.
+              (skip-chars-forward " \t\n")
+              (when (eq (char-after) ?\()
+                (forward-char 1)
                 (let (result)
-                  (dolist (b (read (buffer-substring-no-properties
-                                    (point) end)))
-                    (cond
-                     ((consp b)
-                      (push (cons (symbol-name (car b))
-                                  (if (cdr b) (cadr b) nil))
-                            result))
-                     ((symbolp b)
-                      (push (cons (symbol-name b) nil) result))))
+                  (while (< (point) bindings-end)
+                    (skip-chars-forward " \t\n")
+                    (when (or (>= (point) bindings-end)
+                              (eq (char-after) ?\)))
+                      (setq bindings-end (point)))
+                    (let ((b-start (point)))
+                      (condition-case nil
+                          (let* ((b-end (scan-sexps (point) 1))
+                                 (at-point (<= b-start
+                                               completion-pos
+                                               b-end)))
+                            (unless at-point
+                              (let ((b (read (buffer-substring-no-properties
+                                              b-start b-end))))
+                                (cond
+                                 ((consp b)
+                                  (push (cons (symbol-name (car b))
+                                              (if (cdr b) (cadr b) nil))
+                                        result))
+                                 ((symbolp b)
+                                  (push (cons (symbol-name b) nil) result)))))
+                            (goto-char b-end))
+                        ;; Unreadable binding -- skip forward.
+                        (error
+                         (ignore-errors
+                           (goto-char (or (scan-sexps (point) 1)
+                                          bindings-end)))))))
                   result)))))))))
 
 (defun let-completion--extract-single-binding (pos keyword)
@@ -141,18 +164,24 @@ Called by `let-completion--binding-values'."
 KEYWORD is a string like \"dolist\" or \"dotimes\".  The binding
 form is (VAR EXPR).  Return one-element alist or nil.
 
+Skip the binding when point falls inside its span.
+
 Called by `let-completion--binding-values'."
   (save-excursion
-    (goto-char (1+ pos))
-    (when (looking-at (concat "\\_<" (regexp-quote keyword) "\\_>"))
-      (forward-sexp 1)
-      (ignore-errors
-        (let ((binding (read (buffer-substring-no-properties
-                              (point)
-                              (save-excursion (forward-sexp 1) (point))))))
-          (when (and (consp binding) (symbolp (car binding)))
-            (list (cons (symbol-name (car binding))
-                        (cadr binding)))))))))
+    (let ((completion-pos (point)))
+      (goto-char (1+ pos))
+      (when (looking-at (concat "\\_<" (regexp-quote keyword) "\\_>"))
+        (forward-sexp 1)
+        (skip-chars-forward " \t\n")
+        (let ((b-start (point)))
+          (ignore-errors
+            (let ((b-end (scan-sexps (point) 1)))
+              (unless (<= b-start completion-pos b-end)
+                (let ((binding (read (buffer-substring-no-properties
+                                      b-start b-end))))
+                  (when (and (consp binding) (symbolp (car binding)))
+                    (list (cons (symbol-name (car binding))
+                                (cadr binding)))))))))))))
 
 (defun let-completion--binding-values ()
   "Return alist of (NAME-STRING . RAW-SEXP) for enclosing bindings.
@@ -190,9 +219,9 @@ Called by `let-completion--advice'."
                     (funcall table string pred 'metadata)
                   '(metadata))))
         `(metadata (display-sort-function . ,sort-fn)
-                   ,@(assq-delete-all
-                      'display-sort-function
-                      (cdr md)))))
+          ,@(assq-delete-all
+             'display-sort-function
+             (cdr md)))))
      ((eq (car-safe action) 'boundaries)
       (complete-with-action action table string pred))
      (t
@@ -244,7 +273,7 @@ Installed as `:around' advice on `elisp-completion-at-point' by
                            (let ((cell (assoc c vals)))
                              (if cell
                                  (let* ((short (and let-completion-inline-max-width
-                                                   (prin1-to-string (cdr cell))))
+                                                    (prin1-to-string (cdr cell))))
                                         (short (if (and short
                                                         (<= (length short)
                                                             let-completion-inline-max-width))
